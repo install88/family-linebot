@@ -8,6 +8,8 @@ import os
 import hmac
 import base64
 import hashlib
+from datetime import datetime
+
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -15,13 +17,14 @@ from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
     FlexSendMessage, BubbleContainer, BoxComponent,
-    TextComponent, SeparatorComponent
+    TextComponent, SeparatorComponent, JoinEvent
 )
 
 app = Flask(__name__)
 
-LINE_CHANNEL_ACCESS_TOKEN = "7EaTRaTJNUiIOZTokqgGqFgfkGS+I8LOUz7S0Q4sHjQLQau32soh4uki8OOoajE3+LGr9+mLXgbRlts3vUpNefO1JMOfp3jQZ2hWgIMNxxt7L0amov61ZaQw8ygOjujihph0wK1zEWXhb3J2D8jGrQdB04t89/1O/w1cDnyilFU="
-LINE_CHANNEL_SECRET = "bc6a476a09e7b22b577b8a6c3d85b879"
+# 這兩行照你原本的，不要動
+LINE_CHANNEL_ACCESS_TOKEN = "你的原本 token 保持不變"
+LINE_CHANNEL_SECRET = "你的原本 secret 保持不變"
 
 print("[env] token exists:", bool(LINE_CHANNEL_ACCESS_TOKEN))
 print("[env] secret exists:", bool(LINE_CHANNEL_SECRET))
@@ -32,21 +35,29 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # 暫存資料（重啟後清空，未來可換成 SQLite）
 step_data = {}
-GROUP_ID  = os.environ.get("LINE_GROUP_ID", "")
+GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
 
 
+# ════════════════════════════════════════════════
+#  健康檢查
+# ════════════════════════════════════════════════
 @app.route("/", methods=["GET"])
-def home():
-    return {"status": "running", "steps": {}, "group_id": ""}, 200
+def health():
+    return {
+        "status": "running",
+        "steps": step_data,
+        "group_id": GROUP_ID,
+    }, 200
+
+
 # ════════════════════════════════════════════════
 #  Webhook 入口
 # ════════════════════════════════════════════════
-
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
-    raw_body = request.get_data()          # bytes
-    body = raw_body.decode("utf-8")        # str
+    raw_body = request.get_data()
+    body = raw_body.decode("utf-8")
 
     expected_signature = base64.b64encode(
         hmac.new(
@@ -73,95 +84,154 @@ def callback():
     return "OK", 200
 
 
+# ════════════════════════════════════════════════
+#  Bot 加入群組事件
+# ════════════════════════════════════════════════
+@handler.add(JoinEvent)
+def handle_join(event):
+    global GROUP_ID
+
+    if hasattr(event.source, "group_id"):
+        GROUP_ID = event.source.group_id
+        print(f"[Bot] 加入群組，記錄 GROUP_ID: {GROUP_ID}")
+
+    welcome_text = (
+        "大家好，我是家庭助理 🤖\n\n"
+        "目前可以使用這些功能：\n"
+        "• /幫助\n"
+        "• 雙和醫院\n"
+        "• /掛號查詢 心臟內科\n"
+        "• /掛號查詢\n"
+        "• /看診進度\n"
+        "• /步數\n"
+        "• /提醒 08:30 記得吃藥"
+    )
+
+    try:
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text=welcome_text)
+        )
+        print("[join] welcome message sent")
+    except Exception as e:
+        print("[join] reply error:", repr(e))
+
+
+# ════════════════════════════════════════════════
+#  接收文字訊息
+# ════════════════════════════════════════════════
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     global GROUP_ID
-    text        = event.message.text.strip()
+
+    text = event.message.text.strip()
     reply_token = event.reply_token
 
-    # 自動記錄群組 ID（Bot 加入群組後第一次有人說話時）
     if hasattr(event.source, "group_id") and not GROUP_ID:
         GROUP_ID = event.source.group_id
         print(f"[Bot] 記錄群組 ID: {GROUP_ID}")
 
-    # ── 指令路由 ──────────────────────────────────
-    if text in ["/幫助", "/help", "幫助", "help"]:
-        do_reply(reply_token, build_help())
+    print(f"[message] source_type={event.source.type}, text={text}")
 
-    elif text in ["/步數", "步數", "媽媽步數"]:
-        do_reply(reply_token, build_steps_message())
+    try:
+        if text in ["/幫助", "/help", "幫助", "help"]:
+            do_reply(reply_token, build_help())
 
-    elif text in ["雙和", "雙和醫院"]:
-        do_reply(reply_token, build_hospital_info())
+        elif text in ["/步數", "步數", "媽媽步數"]:
+            do_reply(reply_token, build_steps_message())
 
-    elif text.startswith("/掛號查詢") or text.startswith("掛號查詢"):
-        # 格式：/掛號查詢 心臟內科
-        keyword = text.replace("/掛號查詢", "").replace("掛號查詢", "").strip()
-        if keyword:
-            do_reply(reply_token, build_appointment_card(keyword))
+        elif text in ["雙和", "雙和醫院"]:
+            do_reply(reply_token, build_hospital_info())
+
+        elif text.startswith("/掛號查詢") or text.startswith("掛號查詢"):
+            keyword = text.replace("/掛號查詢", "").replace("掛號查詢", "").strip()
+            if keyword:
+                do_reply(reply_token, build_appointment_card(keyword))
+            else:
+                do_reply(reply_token, build_dept_menu())
+
+        elif text.startswith("/提醒"):
+            parts = text.split(" ", 2)
+            if len(parts) == 3:
+                do_reply(
+                    reply_token,
+                    f"✅ 提醒已設定\n⏰ {parts[1]}：{parts[2]}\n\n（推播功能即將上線）"
+                )
+            else:
+                do_reply(reply_token, "格式：/提醒 時間 內容\n例：/提醒 08:30 記得吃藥")
+
+        elif text == "/看診進度":
+            do_reply(
+                reply_token,
+                "📋 看診進度查詢\n\n"
+                "請前往雙和醫院官網或 App 查詢即時進度：\n"
+                "🔗 https://shh.tmu.edu.tw\n"
+                "📱 搜尋「雙和掛號」下載 App"
+            )
+
         else:
-            do_reply(reply_token, build_dept_menu())
+            do_reply(
+                reply_token,
+                "我有收到你的訊息："
+                f"{text}\n\n"
+                "可輸入 /幫助 查看目前可用功能。"
+            )
 
-    elif text.startswith("/提醒"):
-        # 格式：/提醒 08:30 記得吃藥
-        parts = text.split(" ", 2)
-        if len(parts) == 3:
-            do_reply(reply_token, f"✅ 提醒已設定\n⏰ {parts[1]}：{parts[2]}\n\n（推播功能即將上線）")
-        else:
-            do_reply(reply_token, "格式：/提醒 時間 內容\n例：/提醒 08:30 記得吃藥")
-
-    elif text == "/看診進度":
-        do_reply(reply_token,
-            "📋 看診進度查詢\n\n"
-            "請前往雙和醫院官網或 App 查詢即時進度：\n"
-            "🔗 https://shh.tmu.edu.tw\n"
-            "📱 搜尋「雙和掛號」下載 App"
-        )
+    except Exception as e:
+        print("[message] handler error:", repr(e))
+        do_reply(reply_token, "⚠️ 抱歉，剛剛處理訊息時發生錯誤，請再試一次。")
 
 
 # ════════════════════════════════════════════════
 #  接收 Android App 步數
 # ════════════════════════════════════════════════
-
 @app.route("/steps", methods=["POST"])
 def receive_steps():
-    data  = request.get_json(silent=True) or {}
+    global step_data
+
+    data = request.get_json(silent=True) or {}
     steps = int(data.get("steps", 0))
-    now   = datetime.now()
+    now = datetime.now()
 
     step_data.update({
         "steps": steps,
-        "date":  now.strftime("%Y-%m-%d"),
-        "time":  now.strftime("%H:%M"),
+        "date": now.strftime("%Y-%m-%d"),
+        "time": now.strftime("%H:%M"),
     })
+
     print(f"[步數] {steps} 步 @ {now.strftime('%H:%M')}")
 
-    # 傍晚 18:00 整點（前 30 分內）自動推播到群組
     if now.hour == 18 and now.minute < 31 and GROUP_ID:
-        line_bot_api.push_message(
-            GROUP_ID,
-            TextSendMessage(text=build_steps_message())
-        )
+        try:
+            line_bot_api.push_message(
+                GROUP_ID,
+                TextSendMessage(text=build_steps_message())
+            )
+            print("[步數] 自動推播成功")
+        except Exception as e:
+            print("[步數] 自動推播失敗:", repr(e))
 
-    return {"status": "ok", "steps": steps}
+    return {"status": "ok", "steps": steps}, 200
 
 
 @app.route("/push-steps", methods=["GET"])
 def manual_push():
-    """手動觸發步數推播（測試用）"""
     if GROUP_ID:
-        line_bot_api.push_message(
-            GROUP_ID,
-            TextSendMessage(text=build_steps_message())
-        )
-        return "推播成功"
+        try:
+            line_bot_api.push_message(
+                GROUP_ID,
+                TextSendMessage(text=build_steps_message())
+            )
+            return "推播成功", 200
+        except Exception as e:
+            print("[push-steps] error:", repr(e))
+            return "推播失敗", 500
     return "尚未設定 GROUP_ID", 400
 
 
 # ════════════════════════════════════════════════
 #  訊息內容建構
 # ════════════════════════════════════════════════
-
 def build_help():
     return (
         "🤖 家庭助理指令表\n\n"
@@ -185,11 +255,16 @@ def build_steps_message():
             "請確認媽媽手機的步數 App 是否正在執行。\n"
             "App 每 30 分鐘自動更新一次。"
         )
+
     steps = step_data["steps"]
-    if   steps >= 8000: emoji, note = "🎉", "太棒了！今日目標達成！"
-    elif steps >= 5000: emoji, note = "👍", "走得不錯，再加把勁！"
-    elif steps >= 2000: emoji, note = "🚶", "走了一些，晚飯後再散散步吧"
-    else:               emoji, note = "💕", "今天步數少，記得多走動喔"
+    if steps >= 8000:
+        emoji, note = "🎉", "太棒了！今日目標達成！"
+    elif steps >= 5000:
+        emoji, note = "👍", "走得不錯，再加把勁！"
+    elif steps >= 2000:
+        emoji, note = "🚶", "走了一些，晚飯後再散散步吧"
+    else:
+        emoji, note = "💕", "今天步數少，記得多走動喔"
 
     return (
         f"👟 媽媽今日步數報告\n"
@@ -200,17 +275,15 @@ def build_steps_message():
     )
 
 
-# ── 雙和醫院資訊 ──────────────────────────────────
-
 HOSPITAL = {
-    "name":     "衛生福利部雙和醫院",
-    "short":    "雙和醫院",
-    "address":  "新北市中和區中正路291號",
-    "phone":    "02-2249-0088",
-    "reg_web":  "https://shh.tmu.edu.tw",
-    "reg_voice":"02-2248-0098（語音）",
-    "reg_human":"02-2248-0607（人工）",
-    "color":    "#1565C0",
+    "name": "衛生福利部雙和醫院",
+    "short": "雙和醫院",
+    "address": "新北市中和區中正路291號",
+    "phone": "02-2249-0088",
+    "reg_web": "https://shh.tmu.edu.tw",
+    "reg_voice": "02-2248-0098（語音）",
+    "reg_human": "02-2248-0607（人工）",
+    "color": "#1565C0",
     "hours": {
         "上午診": "08:30 – 11:30",
         "下午診": "13:30 – 16:30",
@@ -219,7 +292,7 @@ HOSPITAL = {
     "note": "週六僅上午診；週日及國定假日請至急診",
     "depts": [
         "心臟內科", "家醫科", "骨科", "神經內科",
-        "腸胃內科", "眼科",  "復健科", "腎臟科",
+        "腸胃內科", "眼科", "復健科", "腎臟科",
         "胸腔內科", "皮膚科", "精神科", "婦產科",
     ],
     "report_times": "上午診報到截止 11:00\n下午診報到截止 16:00\n夜間診報到截止 20:30",
@@ -236,7 +309,7 @@ def build_hospital_info():
         TextComponent(text="（委託臺北醫學大學興建經營）", size="xs", color="#888888", margin="xs"),
         SeparatorComponent(margin="md"),
         TextComponent(text=f"📍 {h['address']}", size="sm", margin="md", wrap=True),
-        TextComponent(text=f"☎  代表號：{h['phone']}",  size="sm", margin="sm"),
+        TextComponent(text=f"☎  代表號：{h['phone']}", size="sm", margin="sm"),
         SeparatorComponent(margin="md"),
         TextComponent(text="🕐 門診時段", weight="bold", size="sm", margin="md", color="#444444"),
         TextComponent(text=hours_text, size="sm", margin="xs", wrap=True),
@@ -269,11 +342,9 @@ def build_appointment_card(dept):
     h = HOSPITAL
     today = datetime.now().strftime("%Y/%m/%d")
 
-    # 判斷是否為支援的科別
     matched = next((d for d in h["depts"] if dept in d or d in dept), None)
     dept_display = matched or dept
     is_known = matched is not None
-    unknown_note = "" if is_known else f"\n⚠️ 「{dept}」不在常見科別清單，請至網站確認是否有此科別。"
 
     contents = [
         TextComponent(text="🏥 掛號資訊", weight="bold", size="lg", color=h["color"]),
@@ -295,7 +366,7 @@ def build_appointment_card(dept):
         SeparatorComponent(margin="md"),
         TextComponent(text="📞 掛號方式", weight="bold", size="sm", margin="md", color="#444444"),
         TextComponent(text=f"🌐 {h['reg_web']}", size="xs", wrap=True, color="#1565C0", margin="sm"),
-        TextComponent(text=f"📱 App：搜尋「雙和掛號」", size="xs", margin="xs"),
+        TextComponent(text="📱 App：搜尋「雙和掛號」", size="xs", margin="xs"),
         TextComponent(text=f"☎ 語音：{h['reg_voice']}", size="xs", margin="xs"),
         TextComponent(text=f"☎ 人工：{h['reg_human']}", size="xs", margin="xs"),
         SeparatorComponent(margin="md"),
@@ -304,10 +375,12 @@ def build_appointment_card(dept):
     ]
 
     if not is_known:
-        contents.append(TextComponent(
-            text=f"⚠️「{dept}」不在常見科別清單，請至網站確認是否有此科",
-            size="xs", wrap=True, margin="md", color="#E65100"
-        ))
+        contents.append(
+            TextComponent(
+                text=f"⚠️「{dept}」不在常見科別清單，請至網站確認是否有此科",
+                size="xs", wrap=True, margin="md", color="#E65100"
+            )
+        )
 
     return FlexSendMessage(
         alt_text=f"雙和醫院 {dept_display} 掛號資訊",
@@ -326,25 +399,15 @@ def build_dept_menu():
 # ════════════════════════════════════════════════
 #  工具函式
 # ════════════════════════════════════════════════
-
 def do_reply(reply_token, content):
-    if isinstance(content, str):
-        line_bot_api.reply_message(reply_token, TextSendMessage(text=content))
-    elif content is not None:
-        line_bot_api.reply_message(reply_token, content)
-
-
-# ════════════════════════════════════════════════
-#  健康檢查
-# ════════════════════════════════════════════════
-
-@app.route("/", methods=["GET"])
-def health():
-    return {
-        "status":   "running",
-        "steps":    step_data,
-        "group_id": GROUP_ID,
-    }
+    try:
+        if isinstance(content, str):
+            line_bot_api.reply_message(reply_token, TextSendMessage(text=content))
+        elif content is not None:
+            line_bot_api.reply_message(reply_token, content)
+    except Exception as e:
+        print("[do_reply] error:", repr(e))
+        raise
 
 
 if __name__ == "__main__":
