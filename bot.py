@@ -36,10 +36,19 @@ GROUP_ID  = os.environ.get("LINE_GROUP_ID", "")
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
     body = request.get_data(as_text=True)
+
+    print("[callback] signature exists:", bool(signature))
+    print("[callback] body:", body)
+
     try:
         handler.handle(body, signature)
-    except InvalidSignatureError:
+    except InvalidSignatureError as e:
+        print("[callback] InvalidSignatureError:", str(e))
         abort(400)
+    except Exception as e:
+        print("[callback] Exception:", repr(e))
+        abort(400)
+
     return "OK"
 
 
