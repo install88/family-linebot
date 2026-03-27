@@ -20,8 +20,8 @@ from linebot.models import (
 
 app = Flask(__name__)
 
-LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
-LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+LINE_CHANNEL_ACCESS_TOKEN = "7EaTRaTJNUiIOZTokqgGqFgfkGS+I8LOUz7S0Q4sHjQLQau32soh4uki8OOoajE3+LGr9+mLXgbRlts3vUpNefO1JMOfp3jQZ2hWgIMNxxt7L0amov61ZaQw8ygOjujihph0wK1zEWXhb3J2D8jGrQdB04t89/1O/w1cDnyilFU="
+LINE_CHANNEL_SECRET = "bc6a476a09e7b22b577b8a6c3d85b879"
 
 print("[env] token exists:", bool(LINE_CHANNEL_ACCESS_TOKEN))
 print("[env] secret exists:", bool(LINE_CHANNEL_SECRET))
