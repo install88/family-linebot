@@ -5,29 +5,33 @@
 """
 
 import os
-from datetime import datetime
+import hmac
+import base64
+import hashlib
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
-from linebot.models import (
-    MessageEvent, TextMessage, TextSendMessage,
-    FlexSendMessage, BubbleContainer, BoxComponent,
-    TextComponent, SeparatorComponent
-)
 
 app = Flask(__name__)
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ.get("LINE_CHANNEL_ACCESS_TOKEN", "")
-LINE_CHANNEL_SECRET       = os.environ.get("LINE_CHANNEL_SECRET", "")
+LINE_CHANNEL_SECRET = os.environ.get("LINE_CHANNEL_SECRET", "")
+
+print("[env] token exists:", bool(LINE_CHANNEL_ACCESS_TOKEN))
+print("[env] secret exists:", bool(LINE_CHANNEL_SECRET))
+print("[env] secret len:", len(LINE_CHANNEL_SECRET))
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
-handler      = WebhookHandler(LINE_CHANNEL_SECRET)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # 暫存資料（重啟後清空，未來可換成 SQLite）
 step_data = {}
 GROUP_ID  = os.environ.get("LINE_GROUP_ID", "")
 
 
+@app.route("/", methods=["GET"])
+def home():
+    return {"status": "running", "steps": {}, "group_id": ""}, 200
 # ════════════════════════════════════════════════
 #  Webhook 入口
 # ════════════════════════════════════════════════
@@ -35,9 +39,20 @@ GROUP_ID  = os.environ.get("LINE_GROUP_ID", "")
 @app.route("/callback", methods=["POST"])
 def callback():
     signature = request.headers.get("X-Line-Signature", "")
-    body = request.get_data(as_text=True)
+    raw_body = request.get_data()          # bytes
+    body = raw_body.decode("utf-8")        # str
 
-    print("[callback] signature exists:", bool(signature))
+    expected_signature = base64.b64encode(
+        hmac.new(
+            LINE_CHANNEL_SECRET.encode("utf-8"),
+            raw_body,
+            hashlib.sha256
+        ).digest()
+    ).decode("utf-8")
+
+    print("[callback] signature from LINE:", signature)
+    print("[callback] expected signature  :", expected_signature)
+    print("[callback] signature match     :", signature == expected_signature)
     print("[callback] body:", body)
 
     try:
@@ -49,7 +64,7 @@ def callback():
         print("[callback] Exception:", repr(e))
         abort(400)
 
-    return "OK"
+    return "OK", 200
 
 
 @handler.add(MessageEvent, message=TextMessage)
