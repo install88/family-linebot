@@ -73,8 +73,48 @@ def db_insert_step(name, steps, date, time_str):
         print(f"[db] insert error: {e}")
 
 
-def db_get_today_records(date):
-    """從 Supabase 取得某天所有步數紀錄"""
+def db_get_today_records(date, name=None):
+    """從 Supabase 取得某天步數紀錄，可選角色"""
+    if not SUPABASE_URL:
+        return []
+    try:
+        params = {"date": f"eq.{date}", "order": "id.asc"}
+        if name:
+            params["name"] = f"eq.{name}"
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/steps",
+            headers=_supabase_headers(),
+            params=params,
+            timeout=5,
+        )
+        return resp.json() if resp.status_code == 200 else []
+    except Exception as e:
+        print(f"[db] query error: {e}")
+        return []
+
+
+def db_get_date_range(start_date, end_date, name=None):
+    """從 Supabase 取得日期範圍內的紀錄，可選角色"""
+    if not SUPABASE_URL:
+        return []
+    try:
+        conditions = f"(date.gte.{start_date},date.lte.{end_date})"
+        if name:
+            conditions = f"(date.gte.{start_date},date.lte.{end_date},name.eq.{name})"
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/steps",
+            headers=_supabase_headers(),
+            params={"and": conditions, "order": "id.asc"},
+            timeout=5,
+        )
+        return resp.json() if resp.status_code == 200 else []
+    except Exception as e:
+        print(f"[db] range query error: {e}")
+        return []
+
+
+def db_get_latest_all(date):
+    """從 Supabase 取得某天每個人的最新步數"""
     if not SUPABASE_URL:
         return []
     try:
@@ -84,48 +124,15 @@ def db_get_today_records(date):
             params={"date": f"eq.{date}", "order": "id.asc"},
             timeout=5,
         )
-        return resp.json() if resp.status_code == 200 else []
-    except Exception as e:
-        print(f"[db] query error: {e}")
-        return []
-
-
-def db_get_date_range(start_date, end_date):
-    """從 Supabase 取得日期範圍內的紀錄"""
-    if not SUPABASE_URL:
-        return []
-    try:
-        resp = http_requests.get(
-            f"{SUPABASE_URL}/rest/v1/steps",
-            headers=_supabase_headers(),
-            params={
-                "and": f"(date.gte.{start_date},date.lte.{end_date})",
-                "order": "id.asc",
-            },
-            timeout=5,
-        )
-        return resp.json() if resp.status_code == 200 else []
-    except Exception as e:
-        print(f"[db] range query error: {e}")
-        return []
-
-
-def db_get_latest(date):
-    """從 Supabase 取得某天最新一筆"""
-    if not SUPABASE_URL:
-        return None
-    try:
-        resp = http_requests.get(
-            f"{SUPABASE_URL}/rest/v1/steps",
-            headers=_supabase_headers(),
-            params={"date": f"eq.{date}", "order": "id.desc", "limit": "1"},
-            timeout=5,
-        )
         rows = resp.json() if resp.status_code == 200 else []
-        return rows[0] if rows else None
+        # 每個人取最後一筆
+        latest = {}
+        for row in rows:
+            latest[row["name"]] = row
+        return list(latest.values())
     except Exception as e:
         print(f"[db] latest error: {e}")
-        return None
+        return []
 
 
 # ════════════════════════════════════════════════
@@ -342,97 +349,137 @@ def build_help():
         "  /掛號查詢 — 顯示全部科別\n"
         "  /看診進度 — 即時看診進度連結\n\n"
         "👟 步數\n"
-        "  /步數 — 查看今日最新步數\n"
-        "  /步數紀錄 — 今日每筆紀錄\n"
-        "  /步數紀錄 20260329 — 指定日期\n"
-        "  /步數紀錄 7天 — 最近 7 天摘要\n\n"
+        "  /步數 — 全部人今日步數\n"
+        "  /步數紀錄 — 今日全部人詳細\n"
+        "  /步數紀錄 mama — 指定角色今日\n"
+        "  /步數紀錄 mama 7天 — 最近 7 天\n"
+        "  /步數紀錄 mama 20260325 20260329\n"
+        "  /步數紀錄 7天 — 全部人 7 天摘要\n\n"
         "⏰ 提醒\n"
         "  /提醒 08:30 記得吃藥\n\n"
         "輸入 /幫助 隨時查看此列表"
     )
 
 
+def _step_emoji(steps):
+    if steps >= 5000:
+        return "🎉"
+    elif steps >= 3000:
+        return "👍"
+    elif steps >= 1000:
+        return "🚶"
+    return "💕"
+
+
 def build_steps_message():
     today = datetime.now(TW).strftime("%Y-%m-%d")
 
-    # 優先從 Supabase 讀，fallback 到記憶體
-    data = db_get_latest(today) or step_data
-    if not data:
+    people = db_get_latest_all(today)
+    if not people:
         return (
             "📱 尚未收到步數資料\n\n"
-            "請確認媽媽手機的步數 App 是否正在執行。\n"
+            "請確認手機的步數 App 是否正在執行。\n"
             "App 每 30 分鐘自動更新一次。"
         )
 
-    steps = data.get("steps", 0)
-    if steps >= 5000:
-        emoji, note = "🎉", "太棒了，今天走很多，辛苦了！"
-    elif steps >= 3000:
-        emoji, note = "👍", "走得不錯，繼續保持！"
-    elif steps >= 1000:
-        emoji, note = "🚶", "有在走動，很棒喔！"
-    else:
-        emoji, note = "💕", "今天還沒什麼走動，有空出去散散步吧"
+    lines = [f"👟 今日步數報告（{today}）\n"]
 
-    name = data.get("name", "媽媽")
+    for data in people:
+        steps = data.get("steps", 0)
+        name = data.get("name", "?")
+        emoji = _step_emoji(steps)
+        lines.append(f"  {emoji} {name}：{steps:,} 步（{data['time']} 更新）")
 
-    return (
-        f"👟 {name}今日步數報告\n"
-        f"📅 {data['date']}　最後更新：{data['time']}\n\n"
-        f"{emoji} {steps:,} 步\n\n"
-        f"{note}"
-    )
+    return "\n".join(lines)
+
+
+def _parse_date(s):
+    """將 20260331 或 2026-03-31 或 2026/03/31 轉成 2026-03-31，失敗回 None"""
+    clean = s.replace("-", "").replace("/", "")
+    if len(clean) == 8 and clean.isdigit():
+        return f"{clean[:4]}-{clean[4:6]}-{clean[6:8]}"
+    return None
 
 
 def build_steps_history(date_arg=""):
-    # 支援「N天」→ 多日摘要
-    if date_arg and date_arg.endswith("天"):
-        num = date_arg.replace("天", "").strip()
-        if num.isdigit() and int(num) > 0:
-            return build_steps_summary(int(num))
-        return "格式錯誤，請用：/步數紀錄 7天"
+    # 解析參數：分離出 name 和其他部分
+    # 規則：不是日期、不是「N天」的就當作 name
+    parts = date_arg.strip().split() if date_arg else []
+    name = None
+    tokens = []
 
-    # 支援日期範圍：20260329 20260331
-    if date_arg and " " in date_arg.strip():
-        parts = date_arg.strip().split()
-        if len(parts) == 2:
-            s = parts[0].replace("-", "").replace("/", "")
-            e = parts[1].replace("-", "").replace("/", "")
-            if len(s) == 8 and s.isdigit() and len(e) == 8 and e.isdigit():
-                start = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-                end = f"{e[:4]}-{e[4:6]}-{e[6:8]}"
-                return build_steps_range_summary(start, end)
-        return "格式錯誤，請用：/步數紀錄 20260329 20260331"
-
-    # 支援格式：20260331 或 2026-03-31 或 空白（預設今天）
-    if date_arg:
-        clean = date_arg.replace("-", "").replace("/", "")
-        if len(clean) == 8 and clean.isdigit():
-            query_date = f"{clean[:4]}-{clean[4:6]}-{clean[6:8]}"
+    for p in parts:
+        if p.endswith("天"):
+            tokens.append(p)
+        elif _parse_date(p):
+            tokens.append(p)
         else:
-            return "格式錯誤，請用：\n/步數紀錄 20260331\n/步數紀錄 20260329 20260331\n/步數紀錄 7天"
-    else:
-        query_date = datetime.now(TW).strftime("%Y-%m-%d")
+            name = p  # 當作角色名稱
 
-    records = db_get_today_records(query_date)
+    name_label = name if name else "全部"
+
+    # /步數紀錄 mama 7天
+    for t in tokens:
+        if t.endswith("天"):
+            num = t.replace("天", "").strip()
+            if num.isdigit() and int(num) > 0:
+                return _build_summary_days(int(num), name)
+            return "格式錯誤，請用：/步數紀錄 7天"
+
+    # /步數紀錄 mama 20260325 20260329
+    dates = [_parse_date(t) for t in tokens if _parse_date(t)]
+    if len(dates) == 2:
+        return _build_summary_range(dates[0], dates[1], name)
+
+    # /步數紀錄 mama 20260329
+    if len(dates) == 1:
+        return _build_detail(dates[0], name)
+
+    # /步數紀錄 mama（沒有日期 → 今天）
+    # /步數紀錄（沒有任何參數 → 今天全部人）
+    today = datetime.now(TW).strftime("%Y-%m-%d")
+    return _build_detail(today, name)
+
+
+def _build_detail(query_date, name=None):
+    """某天的詳細紀錄（每筆 30 分鐘）"""
+    records = db_get_today_records(query_date, name)
     if not records:
-        return f"📊 {query_date} 沒有步數紀錄"
+        label = name if name else "任何人"
+        return f"📊 {query_date} 沒有 {label} 的步數紀錄"
 
-    name = records[-1].get("name", "媽媽")
+    # 如果沒指定 name，按人分組顯示
+    if not name:
+        people = {}
+        for rec in records:
+            people.setdefault(rec["name"], []).append(rec)
+
+        lines = [f"📊 步數紀錄（{query_date}）\n"]
+        for pname, recs in people.items():
+            lines.append(f"── {pname} ──")
+            for i, rec in enumerate(recs):
+                steps = rec["steps"]
+                if i == 0:
+                    diff_text = "（首筆）"
+                else:
+                    diff = steps - recs[i - 1]["steps"]
+                    diff_text = f"（+{diff:,} 步）" if diff > 0 else f"（{diff:,} 步）"
+                lines.append(f"  {rec['time']}　{steps:,} 步 {diff_text}")
+            if len(recs) >= 2:
+                total_diff = recs[-1]["steps"] - recs[0]["steps"]
+                lines.append(f"  📈 共走了 {total_diff:,} 步\n")
+        return "\n".join(lines)
+
+    # 指定了 name
     lines = [f"📊 {name}步數紀錄（{query_date}）\n"]
-
     for i, rec in enumerate(records):
         steps = rec["steps"]
-        time_str = rec["time"]
         if i == 0:
             diff_text = "（首筆）"
         else:
             diff = steps - records[i - 1]["steps"]
-            if diff > 0:
-                diff_text = f"（+{diff:,} 步）"
-            else:
-                diff_text = f"（{diff:,} 步）"
-        lines.append(f"  {time_str}　{steps:,} 步 {diff_text}")
+            diff_text = f"（+{diff:,} 步）" if diff > 0 else f"（{diff:,} 步）"
+        lines.append(f"  {rec['time']}　{steps:,} 步 {diff_text}")
 
     if len(records) >= 2:
         total_diff = records[-1]["steps"] - records[0]["steps"]
@@ -441,79 +488,55 @@ def build_steps_history(date_arg=""):
     return "\n".join(lines)
 
 
-def build_steps_summary(days):
-    """顯示最近 N 天的每日步數摘要"""
+def _build_daily_summary(records, title):
+    """通用的每日摘要產生器"""
+    if not records:
+        return None
+
+    # 按 (日期, 名字) 分組取最大步數
+    daily = {}
+    for rec in records:
+        key = (rec["date"], rec["name"])
+        if key not in daily or rec["steps"] > daily[key]["steps"]:
+            daily[key] = rec
+
+    lines = [title]
+    total = 0
+    for key in sorted(daily.keys()):
+        d, pname = key
+        steps = daily[key]["steps"]
+        total += steps
+        mark = _step_emoji(steps)
+        lines.append(f"  {d}　{pname}　{steps:,} 步 {mark}")
+
+    count = len(set(k[0] for k in daily.keys()))  # 有資料的天數
+    avg = total // count if count else 0
+    lines.append(f"\n📈 平均：{avg:,} 步/天　合計：{total:,} 步")
+
+    return "\n".join(lines)
+
+
+def _build_summary_days(days, name=None):
+    """最近 N 天摘要"""
     now = datetime.now(TW)
     end_date = now.strftime("%Y-%m-%d")
     start_date = (now - timedelta(days=days - 1)).strftime("%Y-%m-%d")
+    records = db_get_date_range(start_date, end_date, name)
 
-    records = db_get_date_range(start_date, end_date)
-    if not records:
-        return f"📊 最近 {days} 天沒有步數紀錄"
-
-    # 按日期分組，取每天最後一筆（當天最高步數）
-    daily = {}
-    for rec in records:
-        d = rec["date"]
-        if d not in daily or rec["steps"] > daily[d]["steps"]:
-            daily[d] = rec
-
-    name = records[-1].get("name", "媽媽")
-    lines = [f"📊 {name}步數摘要（最近 {days} 天）\n"]
-
-    total = 0
-    for d in sorted(daily.keys()):
-        steps = daily[d]["steps"]
-        total += steps
-        if steps >= 5000:
-            mark = "🎉"
-        elif steps >= 3000:
-            mark = "👍"
-        elif steps >= 1000:
-            mark = "🚶"
-        else:
-            mark = "💕"
-        lines.append(f"  {d}　{steps:,} 步 {mark}")
-
-    avg = total // len(daily) if daily else 0
-    lines.append(f"\n📈 平均：{avg:,} 步/天　合計：{total:,} 步")
-
-    return "\n".join(lines)
+    label = name if name else "全部"
+    title = f"📊 {label}步數摘要（最近 {days} 天）\n"
+    result = _build_daily_summary(records, title)
+    return result if result else f"📊 最近 {days} 天沒有步數紀錄"
 
 
-def build_steps_range_summary(start_date, end_date):
-    """顯示指定日期範圍的每日步數摘要"""
-    records = db_get_date_range(start_date, end_date)
-    if not records:
-        return f"📊 {start_date} ～ {end_date} 沒有步數紀錄"
+def _build_summary_range(start_date, end_date, name=None):
+    """指定日期範圍摘要"""
+    records = db_get_date_range(start_date, end_date, name)
 
-    daily = {}
-    for rec in records:
-        d = rec["date"]
-        if d not in daily or rec["steps"] > daily[d]["steps"]:
-            daily[d] = rec
-
-    name = records[-1].get("name", "媽媽")
-    lines = [f"📊 {name}步數摘要（{start_date} ～ {end_date}）\n"]
-
-    total = 0
-    for d in sorted(daily.keys()):
-        steps = daily[d]["steps"]
-        total += steps
-        if steps >= 5000:
-            mark = "🎉"
-        elif steps >= 3000:
-            mark = "👍"
-        elif steps >= 1000:
-            mark = "🚶"
-        else:
-            mark = "💕"
-        lines.append(f"  {d}　{steps:,} 步 {mark}")
-
-    avg = total // len(daily) if daily else 0
-    lines.append(f"\n📈 平均：{avg:,} 步/天　合計：{total:,} 步")
-
-    return "\n".join(lines)
+    label = name if name else "全部"
+    title = f"📊 {label}步數摘要（{start_date} ～ {end_date}）\n"
+    result = _build_daily_summary(records, title)
+    return result if result else f"📊 {start_date} ～ {end_date} 沒有步數紀錄"
 
 
 HOSPITAL = {
