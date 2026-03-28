@@ -135,6 +135,74 @@ def db_get_latest_all(date):
         return []
 
 
+# ── 行程資料庫操作 ──
+
+def db_insert_event(title, date, time_str, end_time, recurring, weekday, remind_hours):
+    if not SUPABASE_URL:
+        return None
+    try:
+        resp = http_requests.post(
+            f"{SUPABASE_URL}/rest/v1/events",
+            headers={**_supabase_headers(), "Prefer": "return=representation"},
+            json={
+                "title": title, "date": date, "time": time_str,
+                "end_time": end_time, "recurring": recurring,
+                "weekday": weekday, "remind_hours": remind_hours,
+            },
+            timeout=5,
+        )
+        rows = resp.json() if resp.status_code == 201 else []
+        return rows[0] if rows else None
+    except Exception as e:
+        print(f"[db] event insert error: {e}")
+        return None
+
+
+def db_get_events():
+    if not SUPABASE_URL:
+        return []
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/events",
+            headers=_supabase_headers(),
+            params={"order": "id.asc"},
+            timeout=5,
+        )
+        return resp.json() if resp.status_code == 200 else []
+    except Exception as e:
+        print(f"[db] event query error: {e}")
+        return []
+
+
+def db_delete_event(event_id):
+    if not SUPABASE_URL:
+        return False
+    try:
+        resp = http_requests.delete(
+            f"{SUPABASE_URL}/rest/v1/events?id=eq.{event_id}",
+            headers=_supabase_headers(),
+            timeout=5,
+        )
+        return resp.status_code == 204
+    except Exception as e:
+        print(f"[db] event delete error: {e}")
+        return False
+
+
+def db_mark_event_notified(event_id, date_str):
+    if not SUPABASE_URL:
+        return
+    try:
+        http_requests.patch(
+            f"{SUPABASE_URL}/rest/v1/events?id=eq.{event_id}",
+            headers=_supabase_headers(),
+            json={"last_notified": date_str},
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"[db] event notify error: {e}")
+
+
 # ════════════════════════════════════════════════
 #  健康檢查
 # ════════════════════════════════════════════════
@@ -201,6 +269,7 @@ def handle_join(event):
         "• /掛號查詢\n"
         "• /看診進度\n"
         "• /步數\n"
+        "• /行程\n"
         "• /提醒 08:30 記得吃藥"
     )
 
@@ -251,15 +320,9 @@ def handle_message(event):
             else:
                 do_reply(reply_token, build_dept_menu())
 
-        elif text.startswith("/提醒"):
-            parts = text.split(" ", 2)
-            if len(parts) == 3:
-                do_reply(
-                    reply_token,
-                    f"✅ 提醒已設定\n⏰ {parts[1]}：{parts[2]}\n\n（推播功能即將上線）"
-                )
-            else:
-                do_reply(reply_token, "格式：/提醒 時間 內容\n例：/提醒 08:30 記得吃藥")
+        elif text.startswith("/行程") or text.startswith("行程"):
+            arg = text.replace("/行程", "").replace("行程", "").strip()
+            do_reply(reply_token, handle_event_command(arg))
 
         elif text == "/看診進度":
             do_reply(
@@ -338,6 +401,239 @@ def manual_push():
 
 
 # ════════════════════════════════════════════════
+#  行程提醒（由外部 cron 呼叫）
+# ════════════════════════════════════════════════
+@app.route("/check-reminders", methods=["GET"])
+def check_reminders():
+    if not GROUP_ID:
+        return "no group", 200
+
+    now = datetime.now(TW)
+    today = now.strftime("%Y-%m-%d")
+    current_weekday = now.weekday()  # 0=週一 ... 6=週日
+    current_minutes = now.hour * 60 + now.minute
+    sent = 0
+
+    events = db_get_events()
+    for ev in events:
+        # 已經今天通知過了
+        if ev.get("last_notified") == today:
+            continue
+
+        event_time = ev["time"]
+        eh, em = int(event_time.split(":")[0]), int(event_time.split(":")[1])
+        event_minutes = eh * 60 + em
+        remind_hours = ev.get("remind_hours", 2)
+        remind_at = event_minutes - remind_hours * 60
+
+        should_notify = False
+
+        if ev.get("recurring") == "weekly":
+            if current_weekday == ev.get("weekday") and current_minutes >= remind_at and current_minutes < event_minutes:
+                should_notify = True
+        elif ev.get("date") == today:
+            if current_minutes >= remind_at and current_minutes < event_minutes:
+                should_notify = True
+
+        if should_notify:
+            time_display = event_time
+            if ev.get("end_time"):
+                time_display = f"{event_time}～{ev['end_time']}"
+            msg = f"⏰ 行程提醒\n\n📌 {ev['title']}\n🕐 {time_display}"
+            try:
+                line_bot_api.push_message(GROUP_ID, TextSendMessage(text=msg))
+                db_mark_event_notified(ev["id"], today)
+                sent += 1
+                print(f"[提醒] 已推播: {ev['title']}")
+            except Exception as e:
+                print(f"[提醒] 推播失敗: {e}")
+
+    # 清理過期的一次性行程
+    for ev in events:
+        if not ev.get("recurring") and ev.get("date") and ev["date"] < today:
+            db_delete_event(ev["id"])
+
+    return {"checked": len(events), "sent": sent}, 200
+
+
+# ════════════════════════════════════════════════
+#  行程指令處理
+# ════════════════════════════════════════════════
+WEEKDAY_MAP = {
+    "週一": 0, "周一": 0, "星期一": 0,
+    "週二": 1, "周二": 1, "星期二": 1,
+    "週三": 2, "周三": 2, "星期三": 2,
+    "週四": 3, "周四": 3, "星期四": 3,
+    "週五": 4, "周五": 4, "星期五": 4,
+    "週六": 5, "周六": 5, "星期六": 5,
+    "週日": 6, "周日": 6, "星期日": 6, "週天": 6, "周天": 6,
+}
+
+WEEKDAY_NAMES = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
+
+
+def handle_event_command(arg):
+    if not arg or arg == "查詢":
+        return build_event_list()
+
+    if arg.startswith("刪除"):
+        eid = arg.replace("刪除", "").strip()
+        if eid.isdigit():
+            ok = db_delete_event(int(eid))
+            return f"✅ 已刪除行程 #{eid}" if ok else f"❌ 找不到行程 #{eid}"
+        return "格式：/行程 刪除 編號\n例：/行程 刪除 23"
+
+    return parse_and_create_event(arg)
+
+
+def parse_and_create_event(arg):
+    parts = arg.split()
+    if len(parts) < 2:
+        return event_help()
+
+    # 解析「提前N小時」
+    remind_hours = 2
+    filtered = []
+    for p in parts:
+        if p.startswith("提前") and p.endswith("小時"):
+            num = p.replace("提前", "").replace("小時", "")
+            if num.isdigit():
+                remind_hours = int(num)
+        else:
+            filtered.append(p)
+    parts = filtered
+
+    # 判斷是否為每週重複
+    first = parts[0]
+    recurring_key = None
+    for key in WEEKDAY_MAP:
+        if first.endswith(key):
+            # 支援「每週五」或「週五」
+            recurring_key = key
+            break
+
+    if recurring_key:
+        weekday = WEEKDAY_MAP[recurring_key]
+        rest = parts[1:]
+        if len(rest) < 2:
+            return event_help()
+
+        time_str = rest[0]
+        # 判斷第二個是結束時間還是標題
+        if len(rest) >= 3 and ":" in rest[1]:
+            end_time = rest[1]
+            title = " ".join(rest[2:])
+        else:
+            end_time = None
+            title = " ".join(rest[1:])
+
+        ev = db_insert_event(title, None, time_str, end_time, "weekly", weekday, remind_hours)
+        if not ev:
+            return "❌ 新增失敗，請稍後再試"
+
+        time_display = time_str
+        if end_time:
+            time_display = f"{time_str}～{end_time}"
+        return (
+            f"✅ 已新增重複行程\n\n"
+            f"📌 {title}\n"
+            f"📅 每{WEEKDAY_NAMES[weekday]} {time_display}\n"
+            f"⏰ 提前 {remind_hours} 小時提醒"
+        )
+
+    # 一次性行程：0401 14:00 標題
+    date_str = _parse_date_short(parts[0])
+    if not date_str:
+        return event_help()
+
+    rest = parts[1:]
+    if len(rest) < 2:
+        return event_help()
+
+    time_str = rest[0]
+    if len(rest) >= 3 and ":" in rest[1]:
+        end_time = rest[1]
+        title = " ".join(rest[2:])
+    else:
+        end_time = None
+        title = " ".join(rest[1:])
+
+    ev = db_insert_event(title, date_str, time_str, end_time, None, None, remind_hours)
+    if not ev:
+        return "❌ 新增失敗，請稍後再試"
+
+    time_display = time_str
+    if end_time:
+        time_display = f"{time_str}～{end_time}"
+    return (
+        f"✅ 已新增行程\n\n"
+        f"📌 {title}\n"
+        f"📅 {date_str} {time_display}\n"
+        f"⏰ 提前 {remind_hours} 小時提醒"
+    )
+
+
+def _parse_date_short(s):
+    """支援 0401 → 2026-04-01，或 20260401 → 2026-04-01"""
+    clean = s.replace("-", "").replace("/", "")
+    if len(clean) == 4 and clean.isdigit():
+        year = datetime.now(TW).strftime("%Y")
+        return f"{year}-{clean[:2]}-{clean[2:4]}"
+    if len(clean) == 8 and clean.isdigit():
+        return f"{clean[:4]}-{clean[4:6]}-{clean[6:8]}"
+    return None
+
+
+def build_event_list():
+    events = db_get_events()
+    if not events:
+        return "📅 目前沒有任何行程"
+
+    lines = ["📅 行程列表\n"]
+
+    recurring_events = [e for e in events if e.get("recurring")]
+    onetime_events = [e for e in events if not e.get("recurring")]
+
+    if recurring_events:
+        lines.append("🔁 重複行程")
+        for ev in recurring_events:
+            wd = WEEKDAY_NAMES[ev["weekday"]] if ev.get("weekday") is not None else "?"
+            time_display = ev["time"]
+            if ev.get("end_time"):
+                time_display = f"{ev['time']}～{ev['end_time']}"
+            lines.append(f"  #{ev['id']} 每{wd} {time_display} {ev['title']}（提前{ev.get('remind_hours', 2)}小時）")
+
+    if onetime_events:
+        if recurring_events:
+            lines.append("")
+        lines.append("📌 單次行程")
+        for ev in onetime_events:
+            time_display = ev["time"]
+            if ev.get("end_time"):
+                time_display = f"{ev['time']}～{ev['end_time']}"
+            lines.append(f"  #{ev['id']} {ev.get('date', '?')} {time_display} {ev['title']}（提前{ev.get('remind_hours', 2)}小時）")
+
+    lines.append("\n刪除請輸入：/行程 刪除 編號")
+    return "\n".join(lines)
+
+
+def event_help():
+    return (
+        "📅 行程指令格式\n\n"
+        "單次行程：\n"
+        "  /行程 0401 18:00 哥哥不回家吃飯\n"
+        "  /行程 0405 14:00 15:00 媽媽復健\n\n"
+        "重複行程：\n"
+        "  /行程 每週五 14:00 15:00 爸媽運動時間\n\n"
+        "自訂提前提醒：\n"
+        "  /行程 每週五 14:00 15:00 運動 提前5小時\n\n"
+        "查詢/刪除：\n"
+        "  /行程 查詢\n"
+        "  /行程 刪除 23"
+    )
+
+
+# ════════════════════════════════════════════════
 #  訊息內容建構
 # ════════════════════════════════════════════════
 def build_help():
@@ -355,6 +651,11 @@ def build_help():
         "  /步數紀錄 mama 7天 — 最近 7 天\n"
         "  /步數紀錄 mama 20260325 20260329\n"
         "  /步數紀錄 7天 — 全部人 7 天摘要\n\n"
+        "📅 行程\n"
+        "  /行程 0401 18:00 哥哥不回家吃飯\n"
+        "  /行程 每週五 14:00 15:00 爸媽運動\n"
+        "  /行程 查詢 — 查看所有行程\n"
+        "  /行程 刪除 編號\n\n"
         "⏰ 提醒\n"
         "  /提醒 08:30 記得吃藥\n\n"
         "輸入 /幫助 隨時查看此列表"
