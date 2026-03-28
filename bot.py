@@ -392,13 +392,25 @@ def build_steps_history(date_arg=""):
             return build_steps_summary(int(num))
         return "格式錯誤，請用：/步數紀錄 7天"
 
+    # 支援日期範圍：20260329 20260331
+    if date_arg and " " in date_arg.strip():
+        parts = date_arg.strip().split()
+        if len(parts) == 2:
+            s = parts[0].replace("-", "").replace("/", "")
+            e = parts[1].replace("-", "").replace("/", "")
+            if len(s) == 8 and s.isdigit() and len(e) == 8 and e.isdigit():
+                start = f"{s[:4]}-{s[4:6]}-{s[6:8]}"
+                end = f"{e[:4]}-{e[4:6]}-{e[6:8]}"
+                return build_steps_range_summary(start, end)
+        return "格式錯誤，請用：/步數紀錄 20260329 20260331"
+
     # 支援格式：20260331 或 2026-03-31 或 空白（預設今天）
     if date_arg:
         clean = date_arg.replace("-", "").replace("/", "")
         if len(clean) == 8 and clean.isdigit():
             query_date = f"{clean[:4]}-{clean[4:6]}-{clean[6:8]}"
         else:
-            return "格式錯誤，請用：\n/步數紀錄 20260331\n/步數紀錄 7天"
+            return "格式錯誤，請用：\n/步數紀錄 20260331\n/步數紀錄 20260329 20260331\n/步數紀錄 7天"
     else:
         query_date = datetime.now(TW).strftime("%Y-%m-%d")
 
@@ -448,6 +460,41 @@ def build_steps_summary(days):
 
     name = records[-1].get("name", "媽媽")
     lines = [f"📊 {name}步數摘要（最近 {days} 天）\n"]
+
+    total = 0
+    for d in sorted(daily.keys()):
+        steps = daily[d]["steps"]
+        total += steps
+        if steps >= 5000:
+            mark = "🎉"
+        elif steps >= 3000:
+            mark = "👍"
+        elif steps >= 1000:
+            mark = "🚶"
+        else:
+            mark = "💕"
+        lines.append(f"  {d}　{steps:,} 步 {mark}")
+
+    avg = total // len(daily) if daily else 0
+    lines.append(f"\n📈 平均：{avg:,} 步/天　合計：{total:,} 步")
+
+    return "\n".join(lines)
+
+
+def build_steps_range_summary(start_date, end_date):
+    """顯示指定日期範圍的每日步數摘要"""
+    records = db_get_date_range(start_date, end_date)
+    if not records:
+        return f"📊 {start_date} ～ {end_date} 沒有步數紀錄"
+
+    daily = {}
+    for rec in records:
+        d = rec["date"]
+        if d not in daily or rec["steps"] > daily[d]["steps"]:
+            daily[d] = rec
+
+    name = records[-1].get("name", "媽媽")
+    lines = [f"📊 {name}步數摘要（{start_date} ～ {end_date}）\n"]
 
     total = 0
     for d in sorted(daily.keys()):
