@@ -38,8 +38,8 @@ line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # Supabase 設定
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+SUPABASE_URL = "https://oqydathbpfnigrhxgplb.supabase.co"
+SUPABASE_KEY = "sb_publishable_Hw2ErHE0YQD3S14JB5pXiQ_pHQFNmWc"
 
 # 記憶體快取（加速讀取，Supabase 為持久備份）
 step_data = {}
