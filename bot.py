@@ -8,6 +8,8 @@ import os
 import hmac
 import base64
 import hashlib
+import json
+import requests as http_requests
 from datetime import datetime, timezone, timedelta
 
 TW = timezone(timedelta(hours=8))
@@ -35,10 +37,75 @@ print("[env] secret len:", len(LINE_CHANNEL_SECRET))
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 暫存資料（重啟後清空，未來可換成 SQLite）
+# Supabase 設定
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY", "")
+
+# 記憶體快取（加速讀取，Supabase 為持久備份）
 step_data = {}
-step_history = {}  # {"2026-03-29": [{"time": "14:00", "steps": 800}, ...]}
 GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
+
+
+# ════════════════════════════════════════════════
+#  Supabase 資料庫操作
+# ════════════════════════════════════════════════
+def _supabase_headers():
+    return {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+    }
+
+
+def db_insert_step(name, steps, date, time_str):
+    """寫入一筆步數紀錄到 Supabase"""
+    if not SUPABASE_URL:
+        return
+    try:
+        http_requests.post(
+            f"{SUPABASE_URL}/rest/v1/steps",
+            headers=_supabase_headers(),
+            json={"name": name, "steps": steps, "date": date, "time": time_str},
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"[db] insert error: {e}")
+
+
+def db_get_today_records(date):
+    """從 Supabase 取得某天所有步數紀錄"""
+    if not SUPABASE_URL:
+        return []
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/steps",
+            headers=_supabase_headers(),
+            params={"date": f"eq.{date}", "order": "id.asc"},
+            timeout=5,
+        )
+        return resp.json() if resp.status_code == 200 else []
+    except Exception as e:
+        print(f"[db] query error: {e}")
+        return []
+
+
+def db_get_latest(date):
+    """從 Supabase 取得某天最新一筆"""
+    if not SUPABASE_URL:
+        return None
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/steps",
+            headers=_supabase_headers(),
+            params={"date": f"eq.{date}", "order": "id.desc", "limit": "1"},
+            timeout=5,
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+        return rows[0] if rows else None
+    except Exception as e:
+        print(f"[db] latest error: {e}")
+        return None
 
 
 # ════════════════════════════════════════════════
@@ -49,7 +116,6 @@ def health():
     return {
         "status": "running",
         "steps": step_data,
-        "history": step_history,
         "group_id": GROUP_ID,
     }, 200
 
@@ -144,8 +210,9 @@ def handle_message(event):
         elif text in ["/步數", "步數", "媽媽步數"]:
             do_reply(reply_token, build_steps_message())
 
-        elif text in ["/步數紀錄", "步數紀錄"]:
-            do_reply(reply_token, build_steps_history())
+        elif text.startswith("/步數紀錄") or text.startswith("步數紀錄"):
+            date_arg = text.replace("/步數紀錄", "").replace("步數紀錄", "").strip()
+            do_reply(reply_token, build_steps_history(date_arg))
 
         elif text in ["雙和", "雙和醫院"]:
             do_reply(reply_token, build_hospital_info())
@@ -210,10 +277,8 @@ def receive_steps():
         "time": time_str,
     })
 
-    # 記錄每筆歷史
-    if today not in step_history:
-        step_history[today] = []
-    step_history[today].append({"time": time_str, "steps": steps})
+    # 寫入 Supabase
+    db_insert_step(name, steps, today, time_str)
 
     print(f"[步數] {name} {steps} 步 @ {time_str}")
 
@@ -258,7 +323,8 @@ def build_help():
         "  /看診進度 — 即時看診進度連結\n\n"
         "👟 步數\n"
         "  /步數 — 查看今日最新步數\n"
-        "  /步數紀錄 — 查看今日每筆上傳紀錄\n\n"
+        "  /步數紀錄 — 查看今日每筆紀錄\n"
+        "  /步數紀錄 20260329 — 查看指定日期\n\n"
         "⏰ 提醒\n"
         "  /提醒 08:30 記得吃藥\n\n"
         "輸入 /幫助 隨時查看此列表"
@@ -266,14 +332,18 @@ def build_help():
 
 
 def build_steps_message():
-    if not step_data:
+    today = datetime.now(TW).strftime("%Y-%m-%d")
+
+    # 優先從 Supabase 讀，fallback 到記憶體
+    data = db_get_latest(today) or step_data
+    if not data:
         return (
             "📱 尚未收到步數資料\n\n"
             "請確認媽媽手機的步數 App 是否正在執行。\n"
             "App 每 30 分鐘自動更新一次。"
         )
 
-    steps = step_data["steps"]
+    steps = data.get("steps", 0)
     if steps >= 5000:
         emoji, note = "🎉", "太棒了，今天走很多，辛苦了！"
     elif steps >= 3000:
@@ -283,26 +353,33 @@ def build_steps_message():
     else:
         emoji, note = "💕", "今天還沒什麼走動，有空出去散散步吧"
 
-    name = step_data.get("name", "媽媽")
+    name = data.get("name", "媽媽")
 
     return (
         f"👟 {name}今日步數報告\n"
-        f"📅 {step_data['date']}　最後更新：{step_data['time']}\n\n"
+        f"📅 {data['date']}　最後更新：{data['time']}\n\n"
         f"{emoji} {steps:,} 步\n\n"
         f"{note}"
     )
 
 
-def build_steps_history():
-    if not step_history:
-        return "📊 尚無步數紀錄"
+def build_steps_history(date_arg=""):
+    # 支援格式：20260331 或 2026-03-31 或 空白（預設今天）
+    if date_arg:
+        clean = date_arg.replace("-", "").replace("/", "")
+        if len(clean) == 8 and clean.isdigit():
+            query_date = f"{clean[:4]}-{clean[4:6]}-{clean[6:8]}"
+        else:
+            return f"日期格式錯誤，請用：/步數紀錄 20260331"
+    else:
+        query_date = datetime.now(TW).strftime("%Y-%m-%d")
 
-    today = datetime.now(TW).strftime("%Y-%m-%d")
-    date = today if today in step_history else list(step_history.keys())[-1]
-    records = step_history[date]
-    name = step_data.get("name", "媽媽")
+    records = db_get_today_records(query_date)
+    if not records:
+        return f"📊 {query_date} 沒有步數紀錄"
 
-    lines = [f"📊 {name}步數紀錄（{date}）\n"]
+    name = records[-1].get("name", "媽媽")
+    lines = [f"📊 {name}步數紀錄（{query_date}）\n"]
 
     for i, rec in enumerate(records):
         steps = rec["steps"]
