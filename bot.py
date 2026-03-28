@@ -8,7 +8,9 @@ import os
 import hmac
 import base64
 import hashlib
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+TW = timezone(timedelta(hours=8))
 
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -191,15 +193,17 @@ def receive_steps():
 
     data = request.get_json(silent=True) or {}
     steps = int(data.get("steps", 0))
-    now = datetime.now()
+    name = data.get("name", "").strip() or "媽媽"
+    now = datetime.now(TW)
 
     step_data.update({
         "steps": steps,
+        "name": name,
         "date": now.strftime("%Y-%m-%d"),
         "time": now.strftime("%H:%M"),
     })
 
-    print(f"[步數] {steps} 步 @ {now.strftime('%H:%M')}")
+    print(f"[步數] {name} {steps} 步 @ {now.strftime('%H:%M')}")
 
     if now.hour == 18 and now.minute < 31 and GROUP_ID:
         try:
@@ -257,21 +261,22 @@ def build_steps_message():
         )
 
     steps = step_data["steps"]
-    if steps >= 8000:
-        emoji, note = "🎉", "太棒了！今日目標達成！"
-    elif steps >= 5000:
-        emoji, note = "👍", "走得不錯，再加把勁！"
-    elif steps >= 2000:
-        emoji, note = "🚶", "走了一些，晚飯後再散散步吧"
+    if steps >= 5000:
+        emoji, note = "🎉", "太棒了，今天走很多，辛苦了！"
+    elif steps >= 3000:
+        emoji, note = "👍", "走得不錯，繼續保持！"
+    elif steps >= 1000:
+        emoji, note = "🚶", "有在走動，很棒喔！"
     else:
-        emoji, note = "💕", "今天步數少，記得多走動喔"
+        emoji, note = "💕", "今天還沒什麼走動，有空出去散散步吧"
+
+    name = step_data.get("name", "媽媽")
 
     return (
-        f"👟 媽媽今日步數報告\n"
+        f"👟 {name}今日步數報告\n"
         f"📅 {step_data['date']}　最後更新：{step_data['time']}\n\n"
         f"{emoji} {steps:,} 步\n\n"
-        f"{note}\n"
-        f"每日建議目標：8,000 步"
+        f"{note}"
     )
 
 
@@ -340,7 +345,7 @@ def build_hospital_info():
 
 def build_appointment_card(dept):
     h = HOSPITAL
-    today = datetime.now().strftime("%Y/%m/%d")
+    today = datetime.now(TW).strftime("%Y/%m/%d")
 
     matched = next((d for d in h["depts"] if dept in d or d in dept), None)
     dept_display = matched or dept
