@@ -488,32 +488,44 @@ def _build_detail(query_date, name=None):
     return "\n".join(lines)
 
 
-def _build_daily_summary(records, title):
-    """通用的每日摘要產生器"""
+def _build_daily_summary(records, title, name=None):
+    """通用的每日摘要產生器，按人分組顯示"""
     if not records:
         return None
 
-    # 按 (日期, 名字) 分組取最大步數
+    # 按 (名字, 日期) 分組取最大步數
     daily = {}
     for rec in records:
-        key = (rec["date"], rec["name"])
+        key = (rec["name"], rec["date"])
         if key not in daily or rec["steps"] > daily[key]["steps"]:
             daily[key] = rec
 
+    # 按人分組
+    people = {}
+    for (pname, d), rec in daily.items():
+        people.setdefault(pname, []).append((d, rec))
+
     lines = [title]
-    total = 0
-    for key in sorted(daily.keys()):
-        d, pname = key
-        steps = daily[key]["steps"]
-        total += steps
-        mark = _step_emoji(steps)
-        lines.append(f"  {d}　{pname}　{steps:,} 步 {mark}")
+    grand_total = 0
 
-    count = len(set(k[0] for k in daily.keys()))  # 有資料的天數
-    avg = total // count if count else 0
-    lines.append(f"\n📈 平均：{avg:,} 步/天　合計：{total:,} 步")
+    for pname in sorted(people.keys()):
+        days_data = sorted(people[pname], key=lambda x: x[0])
 
-    return "\n".join(lines)
+        if not name and len(people) > 1:
+            lines.append(f"── {pname} ──")
+
+        person_total = 0
+        for d, rec in days_data:
+            steps = rec["steps"]
+            person_total += steps
+            mark = _step_emoji(steps)
+            lines.append(f"  {d}　{steps:,} 步 {mark}")
+
+        avg = person_total // len(days_data) if days_data else 0
+        lines.append(f"  📈 平均：{avg:,} 步/天　合計：{person_total:,} 步\n")
+        grand_total += person_total
+
+    return "\n".join(lines).rstrip()
 
 
 def _build_summary_days(days, name=None):
