@@ -37,6 +37,7 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
 # 暫存資料（重啟後清空，未來可換成 SQLite）
 step_data = {}
+step_history = {}  # {"2026-03-29": [{"time": "14:00", "steps": 800}, ...]}
 GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
 
 
@@ -48,6 +49,7 @@ def health():
     return {
         "status": "running",
         "steps": step_data,
+        "history": step_history,
         "group_id": GROUP_ID,
     }, 200
 
@@ -142,6 +144,9 @@ def handle_message(event):
         elif text in ["/步數", "步數", "媽媽步數"]:
             do_reply(reply_token, build_steps_message())
 
+        elif text in ["/步數紀錄", "步數紀錄"]:
+            do_reply(reply_token, build_steps_history())
+
         elif text in ["雙和", "雙和醫院"]:
             do_reply(reply_token, build_hospital_info())
 
@@ -195,17 +200,24 @@ def receive_steps():
     steps = int(data.get("steps", 0))
     name = data.get("name", "").strip() or "媽媽"
     now = datetime.now(TW)
+    today = now.strftime("%Y-%m-%d")
+    time_str = now.strftime("%H:%M")
 
     step_data.update({
         "steps": steps,
         "name": name,
-        "date": now.strftime("%Y-%m-%d"),
-        "time": now.strftime("%H:%M"),
+        "date": today,
+        "time": time_str,
     })
 
-    print(f"[步數] {name} {steps} 步 @ {now.strftime('%H:%M')}")
+    # 記錄每筆歷史
+    if today not in step_history:
+        step_history[today] = []
+    step_history[today].append({"time": time_str, "steps": steps})
 
-    if now.hour == 18 and now.minute < 31 and GROUP_ID:
+    print(f"[步數] {name} {steps} 步 @ {time_str}")
+
+    if now.hour == 16 and now.minute < 31 and GROUP_ID:
         try:
             line_bot_api.push_message(
                 GROUP_ID,
@@ -245,7 +257,8 @@ def build_help():
         "  /掛號查詢 — 顯示全部科別\n"
         "  /看診進度 — 即時看診進度連結\n\n"
         "👟 步數\n"
-        "  /步數 — 查看媽媽今日步數\n\n"
+        "  /步數 — 查看今日最新步數\n"
+        "  /步數紀錄 — 查看今日每筆上傳紀錄\n\n"
         "⏰ 提醒\n"
         "  /提醒 08:30 記得吃藥\n\n"
         "輸入 /幫助 隨時查看此列表"
@@ -278,6 +291,37 @@ def build_steps_message():
         f"{emoji} {steps:,} 步\n\n"
         f"{note}"
     )
+
+
+def build_steps_history():
+    if not step_history:
+        return "📊 尚無步數紀錄"
+
+    today = datetime.now(TW).strftime("%Y-%m-%d")
+    date = today if today in step_history else list(step_history.keys())[-1]
+    records = step_history[date]
+    name = step_data.get("name", "媽媽")
+
+    lines = [f"📊 {name}步數紀錄（{date}）\n"]
+
+    for i, rec in enumerate(records):
+        steps = rec["steps"]
+        time_str = rec["time"]
+        if i == 0:
+            diff_text = "（首筆）"
+        else:
+            diff = steps - records[i - 1]["steps"]
+            if diff > 0:
+                diff_text = f"（+{diff:,} 步）"
+            else:
+                diff_text = f"（{diff:,} 步）"
+        lines.append(f"  {time_str}　{steps:,} 步 {diff_text}")
+
+    if len(records) >= 2:
+        total_diff = records[-1]["steps"] - records[0]["steps"]
+        lines.append(f"\n📈 {records[0]['time']}～{records[-1]['time']} 共走了 {total_diff:,} 步")
+
+    return "\n".join(lines)
 
 
 HOSPITAL = {
