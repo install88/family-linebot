@@ -401,7 +401,7 @@ def check_reminders():
         event_time = ev["time"]
         eh, em = int(event_time.split(":")[0]), int(event_time.split(":")[1])
         event_minutes = eh * 60 + em
-        remind_hours = ev.get("remind_hours", 2)
+        remind_hours = ev.get("remind_hours", 8)
         remind_at = event_minutes - remind_hours * 60
 
         should_notify = False
@@ -480,7 +480,7 @@ def parse_and_create_event(arg):
         return event_help()
 
     # 解析「提前N小時」
-    remind_hours = 2
+    remind_hours = 8
     filtered = []
     for p in parts:
         if p.startswith("提前") and p.endswith("小時"):
