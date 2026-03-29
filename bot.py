@@ -44,6 +44,46 @@ step_data = {}
 GROUP_ID = os.environ.get("LINE_GROUP_ID", "")
 
 
+def _save_group_id(gid):
+    """把 GROUP_ID 存到 Supabase config table"""
+    global GROUP_ID
+    GROUP_ID = gid
+    if not SUPABASE_URL:
+        return
+    try:
+        # upsert: key=group_id
+        http_requests.post(
+            f"{SUPABASE_URL}/rest/v1/config",
+            headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates"},
+            json={"key": "group_id", "value": gid},
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"[db] save group_id error: {e}")
+
+
+def _load_group_id():
+    """啟動時從 Supabase 讀取 GROUP_ID"""
+    global GROUP_ID
+    if GROUP_ID:
+        return
+    if not SUPABASE_URL:
+        return
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/config",
+            headers=_supabase_headers(),
+            params={"key": "eq.group_id"},
+            timeout=5,
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+        if rows:
+            GROUP_ID = rows[0]["value"]
+            print(f"[db] loaded GROUP_ID: {GROUP_ID}")
+    except Exception as e:
+        print(f"[db] load group_id error: {e}")
+
+
 # ════════════════════════════════════════════════
 #  Supabase 資料庫操作
 # ════════════════════════════════════════════════
@@ -255,7 +295,7 @@ def handle_join(event):
     global GROUP_ID
 
     if hasattr(event.source, "group_id"):
-        GROUP_ID = event.source.group_id
+        _save_group_id(event.source.group_id)
         print(f"[Bot] 加入群組，記錄 GROUP_ID: {GROUP_ID}")
 
     welcome_text = (
@@ -287,9 +327,10 @@ def handle_message(event):
     text = event.message.text.strip()
     reply_token = event.reply_token
 
-    if hasattr(event.source, "group_id") and not GROUP_ID:
-        GROUP_ID = event.source.group_id
-        print(f"[Bot] 記錄群組 ID: {GROUP_ID}")
+    if hasattr(event.source, "group_id"):
+        if event.source.group_id != GROUP_ID:
+            _save_group_id(event.source.group_id)
+            print(f"[Bot] 記錄群組 ID: {GROUP_ID}")
 
     print(f"[message] source_type={event.source.type}, text={text}")
 
@@ -383,6 +424,7 @@ def manual_push():
 # ════════════════════════════════════════════════
 @app.route("/check-reminders", methods=["GET"])
 def check_reminders():
+    _load_group_id()
     if not GROUP_ID:
         return "no group", 200
 
@@ -855,6 +897,7 @@ def do_reply(reply_token, content):
 
 
 if __name__ == "__main__":
+    _load_group_id()
     port = int(os.environ.get("PORT", 8080))
-    print(f"[Bot] 啟動中，port {port}")
+    print(f"[Bot] 啟動中，port {port}, GROUP_ID={GROUP_ID}")
     app.run(host="0.0.0.0", port=port)
