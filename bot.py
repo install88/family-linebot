@@ -896,8 +896,11 @@ def do_reply(reply_token, content):
         raise
 
 
+# 啟動時載入 GROUP_ID（不管是 python bot.py 還是 gunicorn）
+_load_group_id()
+print(f"[Bot] 啟動載入 GROUP_ID={GROUP_ID}")
+
 if __name__ == "__main__":
-    _load_group_id()
     port = int(os.environ.get("PORT", 8080))
-    print(f"[Bot] 啟動中，port {port}, GROUP_ID={GROUP_ID}")
+    print(f"[Bot] 啟動中，port {port}")
     app.run(host="0.0.0.0", port=port)
