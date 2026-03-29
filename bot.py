@@ -351,13 +351,8 @@ def handle_message(event):
             arg = cmd.replace("行程", "").strip()
             do_reply(reply_token, handle_event_command(arg))
 
-        else:
-            do_reply(
-                reply_token,
-                "我有收到你的訊息："
-                f"{text}\n\n"
-                "可輸入 /幫助 查看目前可用功能。"
-            )
+        # 不認識的訊息不回覆，避免在群組裡吵到人
+
 
     except Exception as e:
         print("[message] handler error:", repr(e))
