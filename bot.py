@@ -426,10 +426,20 @@ def check_reminders():
             except Exception as e:
                 print(f"[提醒] 推播失敗: {e}")
 
-    # 清理過期的一次性行程
+    # 清理過期的一次性行程（過了事件時間就刪）
     for ev in events:
-        if not ev.get("recurring") and ev.get("date") and ev["date"] < today:
+        if ev.get("recurring"):
+            continue
+        ev_date = ev.get("date")
+        if not ev_date:
+            continue
+        if ev_date < today:
             db_delete_event(ev["id"])
+        elif ev_date == today:
+            end = ev.get("end_time") or ev.get("time")
+            eh, em = int(end.split(":")[0]), int(end.split(":")[1])
+            if current_minutes >= eh * 60 + em:
+                db_delete_event(ev["id"])
 
     return {"checked": len(events), "sent": sent}, 200
 
