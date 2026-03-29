@@ -294,7 +294,7 @@ def callback():
 def handle_join(event):
     global GROUP_ID
 
-    if hasattr(event.source, "group_id"):
+    if hasattr(event.source, "group_id") and not GROUP_ID:
         _save_group_id(event.source.group_id)
         print(f"[Bot] 加入群組，記錄 GROUP_ID: {GROUP_ID}")
 
@@ -327,10 +327,9 @@ def handle_message(event):
     text = event.message.text.strip()
     reply_token = event.reply_token
 
-    if hasattr(event.source, "group_id"):
-        if event.source.group_id != GROUP_ID:
-            _save_group_id(event.source.group_id)
-            print(f"[Bot] 記錄群組 ID: {GROUP_ID}")
+    if hasattr(event.source, "group_id") and not GROUP_ID:
+        _save_group_id(event.source.group_id)
+        print(f"[Bot] 記錄群組 ID: {GROUP_ID}")
 
     print(f"[message] source_type={event.source.type}, text={text}")
 
