@@ -84,6 +84,35 @@ def _load_group_id():
         print(f"[db] load group_id error: {e}")
 
 
+def _get_config(key):
+    """從 Supabase config table 讀取一個值"""
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/config",
+            headers=_supabase_headers(),
+            params={"key": f"eq.{key}"},
+            timeout=5,
+        )
+        rows = resp.json() if resp.status_code == 200 else []
+        return rows[0]["value"] if rows else None
+    except Exception as e:
+        print(f"[db] get_config error: {e}")
+        return None
+
+
+def _set_config(key, value):
+    """寫入 Supabase config table"""
+    try:
+        http_requests.post(
+            f"{SUPABASE_URL}/rest/v1/config",
+            headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates"},
+            json={"key": key, "value": value},
+            timeout=5,
+        )
+    except Exception as e:
+        print(f"[db] set_config error: {e}")
+
+
 # ════════════════════════════════════════════════
 #  Supabase 資料庫操作
 # ════════════════════════════════════════════════
@@ -386,14 +415,18 @@ def receive_steps():
     print(f"[步數] {name} {steps} 步 @ {time_str}")
 
     if now.hour == 16 and now.minute < 31 and GROUP_ID:
-        try:
-            line_bot_api.push_message(
-                GROUP_ID,
-                TextSendMessage(text=build_steps_message())
-            )
-            print("[步數] 自動推播成功")
-        except Exception as e:
-            print("[步數] 自動推播失敗:", repr(e))
+        # 檢查今天是否已經推播過
+        last_push = _get_config("last_daily_push")
+        if last_push != today:
+            try:
+                line_bot_api.push_message(
+                    GROUP_ID,
+                    TextSendMessage(text=build_steps_message())
+                )
+                _set_config("last_daily_push", today)
+                print("[步數] 自動推播成功")
+            except Exception as e:
+                print("[步數] 自動推播失敗:", repr(e))
 
     return {"status": "ok", "steps": steps}, 200
 
