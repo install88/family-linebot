@@ -414,7 +414,7 @@ def receive_steps():
 
     print(f"[步數] {name} {steps} 步 @ {time_str}")
 
-    if now.hour == 16 and now.minute < 31 and GROUP_ID:
+    if now.hour == 20 and now.minute < 31 and GROUP_ID:
         # 檢查今天是否已經推播過
         last_push = _get_config("last_daily_push")
         if last_push != today:
