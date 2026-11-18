@@ -9,10 +9,12 @@ import hmac
 import base64
 import hashlib
 import json
+import threading
 import requests as http_requests
 from datetime import datetime, timezone, timedelta
 
 TW = timezone(timedelta(hours=8))
+_STEP_UPLOAD_LOCK = threading.RLock()
 
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -103,14 +105,16 @@ def _get_config(key):
 def _set_config(key, value):
     """寫入 Supabase config table"""
     try:
-        http_requests.post(
+        resp = http_requests.post(
             f"{SUPABASE_URL}/rest/v1/config",
             headers={**_supabase_headers(), "Prefer": "resolution=merge-duplicates"},
             json={"key": key, "value": value},
             timeout=5,
         )
+        return resp.status_code in (200, 201, 204)
     except Exception as e:
         print(f"[db] set_config error: {e}")
+        return False
 
 
 # ════════════════════════════════════════════════
@@ -128,16 +132,106 @@ def _supabase_headers():
 def db_insert_step(name, steps, date, time_str):
     """寫入一筆步數紀錄到 Supabase"""
     if not SUPABASE_URL:
-        return
+        return False
     try:
-        http_requests.post(
+        resp = http_requests.post(
             f"{SUPABASE_URL}/rest/v1/steps",
             headers=_supabase_headers(),
             json={"name": name, "steps": steps, "date": date, "time": time_str},
             timeout=5,
         )
+        return resp.status_code in (200, 201, 204)
     except Exception as e:
         print(f"[db] insert error: {e}")
+        return False
+
+
+def _get_step_statuses():
+    """Latest new-client status, using the existing config table (no schema migration)."""
+    try:
+        resp = http_requests.get(
+            f"{SUPABASE_URL}/rest/v1/config", headers=_supabase_headers(),
+            params={"select": "key,value", "key": "like.step_status:*"}, timeout=5,
+        )
+        if resp.status_code != 200:
+            return {}
+        result = {}
+        for row in resp.json():
+            if not row.get("key", "").startswith("step_status:"):
+                continue
+            try:
+                value = json.loads(row["value"])
+                if isinstance(value, dict):
+                    result[row["key"][len("step_status:"):]] = value
+            except (ValueError, TypeError):
+                continue
+        return result
+    except Exception as e:
+        print(f"[db] step status error: {e}")
+        return {}
+
+
+def _persist_step_snapshot(name, metadata, steps, time_str, observation_id=None):
+    """Persist the complete latest snapshot before numeric history, serialized in this worker.
+
+    config holds the durable count and its quality together. A failed history write can
+    be retried without silently losing the partial/waiting flag. No schema change.
+    """
+    key = f"step_status:{name}"
+    with _STEP_UPLOAD_LOCK:
+        try:
+            resp = http_requests.get(f"{SUPABASE_URL}/rest/v1/config", headers=_supabase_headers(),
+                                     params={"key": f"eq.{key}"}, timeout=5)
+            if resp.status_code != 200:
+                return {"error": "Unable to read step status"}, 503
+            prior = next((json.loads(r["value"]) for r in resp.json() if r.get("key") == key), {})
+            if not isinstance(prior, dict):
+                prior = {}
+        except (ValueError, TypeError, http_requests.RequestException):
+            return {"error": "Unable to read step status"}, 503
+        previous = prior.get("observation", {})
+        if not isinstance(previous, dict):
+            previous = {}
+        if metadata["status"] == "waiting":
+            entry = {**metadata, "observation": previous}
+            if not _set_config(key, json.dumps(entry, ensure_ascii=False)):
+                return {"error": "Unable to save waiting status"}, 503
+            return {"status": "waiting", "protocol_version": 2}, 200
+
+        same_source = previous.get("date") == metadata["date"] and previous.get("device_id") == metadata["device_id"]
+        if same_source and previous.get("sensor_at"):
+            if datetime.fromisoformat(previous["sensor_at"]) > datetime.fromisoformat(metadata["sensor_at"]):
+                return {"status": "ignored_older_observation", "protocol_version": 2}, 200
+        observation = {**metadata, "steps": steps, "time": time_str}
+        fingerprint = hashlib.sha256(json.dumps(observation, sort_keys=True).encode()).hexdigest()
+        observation["observation_id"] = str(observation_id or fingerprint)[:96]
+        retry = previous.get("observation_id") == observation["observation_id"]
+        if retry and prior.get("history_saved"):
+            return {"status": "duplicate", "steps": steps, "protocol_version": 2}, 200
+        entry = {"date": metadata["date"], "status": "ok", "observation": observation,
+                 "received_at": prior.get("received_at") if retry else datetime.now(TW).isoformat(),
+                 "history_saved": False}
+        if not _set_config(key, json.dumps(entry, ensure_ascii=False)):
+            return {"error": "Unable to save step quality metadata"}, 503
+        already_saved = False
+        if retry:
+            try:
+                check = http_requests.get(f"{SUPABASE_URL}/rest/v1/steps", headers=_supabase_headers(),
+                    params={"select": "id", "name": f"eq.{name}", "date": f"eq.{metadata['date']}",
+                            "steps": f"eq.{steps}", "time": f"eq.{time_str}",
+                            "created_at": f"gte.{entry['received_at']}", "limit": "1"}, timeout=5)
+                if check.status_code != 200:
+                    return {"error": "Unable to check previous step write"}, 503
+                already_saved = bool(check.json())
+            except http_requests.RequestException:
+                return {"error": "Unable to check previous step write"}, 503
+        if not already_saved and not db_insert_step(name, steps, metadata["date"], time_str):
+            return {"error": "Unable to save step history"}, 503
+        entry["history_saved"] = True
+        # Snapshot/quality are already durable; a missing completion marker is recovered
+        # by the exact history lookup on retry rather than inserting another row.
+        _set_config(key, json.dumps(entry, ensure_ascii=False))
+        return {"status": "ok", "steps": steps, "protocol_version": 2}, 200
 
 
 def db_get_today_records(date, name=None):
@@ -395,12 +489,69 @@ def handle_message(event):
 def receive_steps():
     global step_data
 
-    data = request.get_json(silent=True) or {}
-    steps = int(data.get("steps", 0))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return {"error": "JSON object required"}, 400
+    if "steps" not in data:
+        return {"error": "steps field required"}, 400
+    if not isinstance(data.get("name", ""), str):
+        return {"error": "Invalid name"}, 400
     name = data.get("name", "").strip() or "媽媽"
     now = datetime.now(TW)
     today = now.strftime("%Y-%m-%d")
     time_str = now.strftime("%H:%M")
+
+    modern = any(key in data for key in ("step_date", "sensor_at", "status", "app_version", "device_id"))
+    metadata = None
+    if modern:
+        if data.get("step_date") != today:
+            return {"error": "step_date must match the current Taipei date"}, 409
+        status = data.get("status")
+        if status not in ("ok", "waiting") or type(data.get("partial", False)) is not bool:
+            return {"error": "Invalid step status"}, 400
+        sample = None
+        if data.get("sensor_at") is not None:
+            try:
+                sample = datetime.fromisoformat(data["sensor_at"])
+                if sample.tzinfo is None or sample.utcoffset() is None:
+                    raise ValueError("timezone required")
+                sample = sample.astimezone(TW)
+                if sample > now + timedelta(minutes=2):
+                    raise ValueError("future sensor event")
+            except (ValueError, TypeError, OverflowError):
+                return {"error": "Invalid sensor_at; timezone-aware timestamp required"}, 400
+        if status == "ok" and (sample is None or sample.strftime("%Y-%m-%d") != today):
+            return {"error": "Sensor observation does not belong to today"}, 409
+        metadata = {
+            "date": today, "status": status,
+            "sensor_at": sample.isoformat() if sample else None,
+            "partial": data.get("partial", False),
+            "app_version": str(data.get("app_version", ""))[:32],
+            "device_id": str(data.get("device_id", ""))[:64],
+        }
+        if status == "waiting":
+            if data.get("steps") is not None:
+                return {"error": "Waiting is not a numeric step observation"}, 400
+            return _persist_step_snapshot(name, metadata, None, time_str)
+        time_str = sample.strftime("%H:%M")
+
+    value = data.get("steps", 0)
+    if isinstance(value, bool) or not isinstance(value, (int, str)):
+        return {"error": "Nonnegative integer steps required"}, 400
+    try:
+        steps = int(value)
+        if steps < 0:
+            raise ValueError("negative steps")
+    except (ValueError, OverflowError):
+        return {"error": "Nonnegative integer steps required"}, 400
+
+    if metadata is not None:
+        result, code = _persist_step_snapshot(name, metadata, steps, time_str, data.get("observation_id"))
+        if code != 200 or result["status"] != "ok":
+            return result, code
+        print("[step observation]", json.dumps({"name": name, "steps": steps, **metadata}, ensure_ascii=False))
+    elif not db_insert_step(name, steps, today, time_str):
+        return {"error": "Unable to save step observation"}, 503
 
     step_data.update({
         "steps": steps,
@@ -408,9 +559,6 @@ def receive_steps():
         "date": today,
         "time": time_str,
     })
-
-    # 寫入 Supabase
-    db_insert_step(name, steps, today, time_str)
 
     print(f"[步數] {name} {steps} 步 @ {time_str}")
 
@@ -428,7 +576,7 @@ def receive_steps():
             except Exception as e:
                 print("[步數] 自動推播失敗:", repr(e))
 
-    return {"status": "ok", "steps": steps}, 200
+    return {"status": "ok", "steps": steps, **({"protocol_version": 2} if modern else {})}, 200
 
 
 @app.route("/push-steps", methods=["GET"])
@@ -729,7 +877,8 @@ def build_steps_message():
     today = datetime.now(TW).strftime("%Y-%m-%d")
 
     people = db_get_latest_all(today)
-    if not people:
+    statuses = _get_step_statuses()
+    if not people and not statuses:
         return (
             "📱 尚未收到步數資料\n\n"
             "請確認手機的步數 App 是否正在執行。\n"
@@ -738,11 +887,30 @@ def build_steps_message():
 
     lines = [f"👟 今日步數報告（{today}）\n"]
 
-    for data in people:
+    latest = {data["name"]: data for data in people}
+    for name in sorted(set(latest) | set(statuses)):
+        meta = statuses.get(name, {})
+        observation = meta.get("observation", {})
+        if meta.get("date") == today and meta.get("status") == "waiting":
+            previous = ""
+            if observation.get("date") == today:
+                partial = "・部分累計" if observation.get("partial") else ""
+                previous = f"（前次 {observation['steps']:,} 步{partial}）"
+            lines.append(f"  ⏳ {name}：等待今日感測資料{previous}")
+            continue
+        if meta.get("date") == today and meta.get("status") == "ok" and observation.get("date") == today:
+            data = observation
+        elif name in latest:
+            data = latest[name]
+        else:
+            lines.append(f"  ⏳ {name}：等待今日感測資料")
+            continue
         steps = data.get("steps", 0)
-        name = data.get("name", "?")
         emoji = _step_emoji(steps)
-        lines.append(f"  {emoji} {name}：{steps:,} 步（{data['time']} 更新）")
+        partial = data.get("partial", False)
+        suffix = "・部分累計" if partial else ""
+        lines.append(f"  {emoji} {name}：{steps:,} 步（{data['time']} 更新{suffix}）")
+
 
     return "\n".join(lines)
 
