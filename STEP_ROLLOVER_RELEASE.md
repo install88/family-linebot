@@ -11,7 +11,7 @@
 
 ## 發布順序
 1. 先發布這個分支的後端，再依賴跨日日期驗證的完整保證。App 在午夜前送出的請求可能午夜後才抵達，舊後端只看接收日，不能提供這個保證。
-2. Render 目前使用單一 Python 程序；現代上傳以程序內鎖序列化。如果未來增加多個 worker／副本，需將排序與去重改成 DB transaction/RPC。
+2. 目前方案以單一 Python worker 為部署前提，現代上傳以程序內鎖序列化；增加多個 worker／副本前需將排序與去重改成 DB transaction/RPC。
 3. 無需 DB schema migration。新增的 config key 為 step_status:<暱稱>，保存最新完整觀測與品質；保留既有 rows。
 4. 安裝桌面「家庭步數-1.0.2-跨日修正版.apk」。同一簽章、versionCode 3，直接覆蓋可保留設定。
 5. 開啟 App，確認服務與計步持續運作。鎖屏走路、重新開啟、實際上傳後再查 DB。
@@ -22,7 +22,7 @@
 - Android instrumentation：migration／rebase／activity。
 - Emulator：精確鬧鐘允許與拒絕兩種情境。
 - assembleDebug、assembleDebugAndroidTest、lintDebug：通過，lint 無 Error；簽章與 1.0.1 相同。
-- 實機升級與新資料上傳：已確認；新版鎖屏走路測試結果另記於本次診斷資料夾。
+- 實機升級與新資料上傳：已確認；新版鎖屏走路測試 49 → 81 步（增加 32），未重開 App、服務 PID 不變。
 - 真實整夜跨日執行尚待發生，不將程式測試當作實際跨夜的證明。
 
 ## 歷史資料與還原
